@@ -175,10 +175,10 @@ function AuthScreen({
   return (
     <section className="auth-layout">
       <div className="auth-intro">
-        <a className="brand" href="#"><span className="brand-mark"><ShoppingBasket size={24} /></span><span>Заедно<span className="brand-dot">.</span></span></a>
+        <a className="brand" href="#"><span className="brand-mark"><ShoppingBasket size={24} /></span><span>ShopMates<span className="brand-dot">.</span></span></a>
         <div className="intro-copy">
           <p className="eyebrow">ПО-МАЛКО ЗАБРАВЕНИ НЕЩА</p>
-          <h1>Пазаруването<br />е по-лесно <em>заедно.</em></h1>
+          <h1>Пазаруването<br />е по-лесно <em>с ShopMates.</em></h1>
           <p>Един общ списък, който винаги е актуален за цялото семейство.</p>
           <div className="intro-art" aria-hidden="true"><div className="art-circle"><ShoppingBasket size={100} strokeWidth={1.2} /></div><span className="art-leaf"><Apple size={32} /></span></div>
         </div>
@@ -186,7 +186,7 @@ function AuthScreen({
       </div>
       <div className="auth-panel">
         <form className="auth-form" onSubmit={(event) => void submit(event)}>
-          <div className="mobile-brand brand"><span className="brand-mark"><ShoppingBasket size={22} /></span><span>Заедно<span className="brand-dot">.</span></span></div>
+          <div className="mobile-brand brand"><span className="brand-mark"><ShoppingBasket size={22} /></span><span>ShopMates<span className="brand-dot">.</span></span></div>
           <p className="eyebrow">{mode === 'signup' ? 'ЗАПОЧНЕТЕ БЕЗПЛАТНО' : mode === 'reset' ? 'ВРЪЩАНЕ КЪМ ПРОФИЛА' : 'ВАШИЯТ СЕМЕЕН СПИСЪК'}</p>
           <h2>{title}</h2>
           <p className="form-subtitle">{mode === 'signup' ? 'Регистрирайте се и създайте своето семейство.' : mode === 'reset' ? 'Администраторът може да издаде временна парола.' : 'Влезте, за да видите какво ви трябва.'}</p>
@@ -265,7 +265,7 @@ function ChangePasswordScreen({
 }
 
 function Brand() {
-  return <a className="brand" href="#"><span className="brand-mark"><ShoppingBasket size={22} /></span><span>Заедно<span className="brand-dot">.</span></span></a>
+  return <a className="brand" href="#"><span className="brand-mark"><ShoppingBasket size={22} /></span><span>ShopMates<span className="brand-dot">.</span></span></a>
 }
 
 function FamilySetup({
@@ -686,6 +686,15 @@ type AdminUser = {
   member_count: number | null
 }
 
+type AdminFamily = {
+  family_id: string
+  family_name: string
+  member_count: number
+  created_by: string
+  created_at: string
+  members: Array<{ user_id: string; email: string; display_name: string; role: 'owner' | 'member' }>
+}
+
 function AdminScreen({
   user,
   onBack,
@@ -698,7 +707,12 @@ function AdminScreen({
   onMessage: (message: string) => void
 }) {
   const [users, setUsers] = useState<AdminUser[]>([])
+  const [families, setFamilies] = useState<AdminFamily[]>([])
   const [stats, setStats] = useState({ users: 0, families: 0, items: 0 })
+  const [newFamilyName, setNewFamilyName] = useState('')
+  const [newFamilyError, setNewFamilyError] = useState('')
+  const [newMemberEmail, setNewMemberEmail] = useState<Record<string, string>>({})
+  const [newMemberError, setNewMemberError] = useState<Record<string, string>>({})
   const [sql, setSql] = useState('SELECT id, email, role, disabled, created_at FROM app_users ORDER BY created_at DESC;')
   const [sqlResults, setSqlResults] = useState<unknown>(null)
   const [sqlBusy, setSqlBusy] = useState(false)
@@ -706,9 +720,13 @@ function AdminScreen({
   const [temporaryPasswords, setTemporaryPasswords] = useState<Record<string, string>>({})
 
   const refresh = useCallback(async () => {
-    const result = await api<{ users: AdminUser[]; stats: typeof stats }>('/api/admin/overview')
-    setUsers(result.users)
-    setStats(result.stats)
+    const [overviewResult, familiesResult] = await Promise.all([
+      api<{ users: AdminUser[]; stats: typeof stats }>('/api/admin/overview'),
+      api<{ families: AdminFamily[] }>('/api/admin/families'),
+    ])
+    setUsers(overviewResult.users)
+    setStats(overviewResult.stats)
+    setFamilies(familiesResult.families)
     setLoading(false)
   }, [])
 
@@ -736,6 +754,59 @@ function AdminScreen({
       await refresh()
     } catch (error) {
       onMessage(errorMessage(error, 'Паролата не бе нулирана.'))
+    }
+  }
+
+  async function createFamily(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const name = newFamilyName.trim()
+    if (!name) {
+      setNewFamilyError('Въведете име на списъка.')
+      return
+    }
+    setNewFamilyError('')
+    try {
+      await api('/api/admin/families', { method: 'POST', body: JSON.stringify({ name }) })
+      setNewFamilyName('')
+      await refresh()
+    } catch (error) {
+      setNewFamilyError(errorMessage(error, 'Списъкът не бе създаден.'))
+    }
+  }
+
+  async function deleteFamily(familyId: string) {
+    if (!window.confirm('Да изтрием ли този списък и всичките му продукти?')) return
+    try {
+      await api(`/api/admin/families/${familyId}`, { method: 'DELETE' })
+      await refresh()
+    } catch (error) {
+      onMessage(errorMessage(error, 'Списъкът не бе изтрит.'))
+    }
+  }
+
+  async function addMemberToFamily(familyId: string, email: string) {
+    const normalized = email.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      setNewMemberError((current) => ({ ...current, [familyId]: 'Въведете валиден имейл адрес.' }))
+      return
+    }
+    setNewMemberError((current) => ({ ...current, [familyId]: '' }))
+    try {
+      await api(`/api/admin/families/${familyId}/members`, { method: 'POST', body: JSON.stringify({ email: normalized }) })
+      setNewMemberEmail((current) => ({ ...current, [familyId]: '' }))
+      await refresh()
+    } catch (error) {
+      setNewMemberError((current) => ({ ...current, [familyId]: errorMessage(error, 'Членът не бе добавен.') }))
+    }
+  }
+
+  async function removeMemberFromFamily(familyId: string, userId: string) {
+    if (!window.confirm('Да премахнем ли този потребител от списъка?')) return
+    try {
+      await api(`/api/admin/families/${familyId}/members/${userId}`, { method: 'DELETE' })
+      await refresh()
+    } catch (error) {
+      onMessage(errorMessage(error, 'Членът не бе премахнат.'))
     }
   }
 
@@ -785,6 +856,33 @@ function AdminScreen({
                 <button className="button button-secondary" onClick={() => void updateUser(target, { role: target.role === 'admin' ? 'user' : 'admin' })} disabled={target.id === user.id}>{target.role === 'admin' ? 'Премахни админ' : 'Направи админ'}</button>
                 <button className="button button-secondary" onClick={() => void resetPassword(target)} disabled={target.disabled || target.id === user.id}>Нулирай парола</button>
                 <button className="button button-secondary" onClick={() => void updateUser(target, { disabled: !target.disabled })} disabled={target.id === user.id}>{target.disabled ? 'Активирай' : 'Деактивирай'}</button>
+              </div></td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
+      </section>
+      <section className="admin-panel">
+        <div className="admin-panel-title"><div><h2>Списъци</h2><p>Създавайте нови списъци, изтривайте съществуващи и управлявайте членове във всеки списък.</p></div></div>
+        <form onSubmit={(event) => void createFamily(event)} className="family-create-form">
+          <label>Име на списъка<input value={newFamilyName} onChange={(event) => setNewFamilyName(event.target.value)} placeholder="Например: Къща или Град" /></label>
+          <button className="button button-primary" type="submit">Създай списък</button>
+        </form>
+        {newFamilyError && <p className="inline-error" role="alert">{newFamilyError}</p>}
+        {families.length === 0 ? <p className="empty-hint">Няма създадени списъци.</p> : <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead><tr><th>Списък</th><th>Членове</th><th>Действия</th></tr></thead>
+            <tbody>{families.map((family) => <tr key={family.family_id}>
+              <td><strong>{family.family_name}</strong><small>{family.member_count} членове</small></td>
+              <td>
+                <div className="family-member-list">{family.members.length === 0 ? <span>—</span> : family.members.map((member) => <div key={member.user_id} className="family-member-row"><span>{member.display_name || member.email}</span><button className="button button-secondary" type="button" onClick={() => void removeMemberFromFamily(family.family_id, member.user_id)}>Премахни</button></div>)}</div>
+              </td>
+              <td><div className="admin-actions">
+                <div className="inline-add-member">
+                  <input value={newMemberEmail[family.family_id] ?? ''} onChange={(event) => setNewMemberEmail((current) => ({ ...current, [family.family_id]: event.target.value }))} placeholder="имейл@пример.bg" />
+                  <button className="button button-secondary" type="button" onClick={() => void addMemberToFamily(family.family_id, newMemberEmail[family.family_id] ?? '')}>Добави член</button>
+                </div>
+                {newMemberError[family.family_id] && <p className="inline-error" role="alert">{newMemberError[family.family_id]}</p>}
+                <button className="button button-secondary" type="button" onClick={() => void deleteFamily(family.family_id)}>Изтрий списък</button>
               </div></td>
             </tr>)}</tbody>
           </table>

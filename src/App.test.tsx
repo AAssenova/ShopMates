@@ -52,4 +52,26 @@ describe('authentication screen', () => {
     }))
     expect(await screen.findByRole('button', { name: /Създай семеен списък/ })).toBeInTheDocument()
   })
+
+  it('shows the ShopMates brand and exposes family management in the admin area', async () => {
+    apiMock.mockImplementation((path: string) => {
+      if (path === '/api/me') {
+        return Promise.resolve({ user: { id: 'admin-1', email: 'admin@example.test', display_name: 'Администратор', role: 'admin', must_change_password: false } })
+      }
+      if (path === '/api/family') {
+        return Promise.resolve({ family: { family_id: 'family-1', family_name: 'Домашно', role: 'owner', member_count: 2, members: [{ user_id: 'admin-1', display_name: 'Администратор', role: 'owner' }, { user_id: 'user-1', display_name: 'Потребител', role: 'member' }] } })
+      }
+      if (path === '/api/admin/overview') {
+        return Promise.resolve({ users: [], stats: { users: 2, families: 1, items: 0 } })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('ShopMates')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /Админ/ }))
+    expect(await screen.findByText('Списъци')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Създай списък/ })).toBeInTheDocument()
+  })
 })

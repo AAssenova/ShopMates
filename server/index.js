@@ -129,7 +129,9 @@ async function currentFamily(userId) {
             (SELECT count(*)::int FROM family_members m WHERE m.family_id = f.id) AS member_count
      FROM family_members fm
      JOIN families f ON f.id = fm.family_id
-     WHERE fm.user_id = $1`,
+     WHERE fm.user_id = $1
+     ORDER BY fm.joined_at
+     LIMIT 1`,
     [userId],
   )
   const family = rows[0]
@@ -143,8 +145,49 @@ async function currentFamily(userId) {
   return { ...family, members: members.rows }
 }
 
+async function familySummary(familyId) {
+  const { rows: familyRows } = await pool.query(
+    `SELECT f.id AS family_id, f.name AS family_name, f.created_by,
+            (SELECT count(*)::int FROM family_members m WHERE m.family_id = f.id) AS member_count
+     FROM families f
+     WHERE f.id = $1`,
+    [familyId],
+  )
+  if (!familyRows[0]) return null
+  const { rows: memberRows } = await pool.query(
+    `SELECT u.id AS user_id, u.email, u.display_name, m.role
+     FROM family_members m
+     JOIN app_users u ON u.id = m.user_id
+     WHERE m.family_id = $1
+     ORDER BY m.joined_at`,
+    [familyId],
+  )
+  return { ...familyRows[0], members: memberRows }
+}
+
+async function listAdminFamilies() {
+  const { rows } = await pool.query(
+    `SELECT f.id AS family_id, f.name AS family_name, f.created_by, f.created_at,
+            (SELECT count(*)::int FROM family_members m WHERE m.family_id = f.id) AS member_count
+     FROM families f
+     ORDER BY f.created_at DESC`,
+  )
+  const families = await Promise.all(rows.map(async (family) => {
+    const members = await pool.query(
+      `SELECT u.id AS user_id, u.email, u.display_name, m.role
+       FROM family_members m
+       JOIN app_users u ON u.id = m.user_id
+       WHERE m.family_id = $1
+       ORDER BY m.joined_at`,
+      [family.family_id],
+    )
+    return { ...family, members: members.rows }
+  }))
+  return families
+}
+
 async function userFamilyId(userId) {
-  const { rows } = await pool.query('SELECT family_id FROM family_members WHERE user_id = $1', [userId])
+  const { rows } = await pool.query('SELECT family_id FROM family_members WHERE user_id = $1 ORDER BY joined_at LIMIT 1', [userId])
   return rows[0]?.family_id ?? null
 }
 
@@ -251,11 +294,6 @@ app.post('/api/family', requireAuth, asyncRoute(async (request, response) => {
   try {
     await client.query('BEGIN')
     await client.query('SELECT id FROM app_users WHERE id = $1 FOR UPDATE', [request.user.id])
-    const membership = await client.query('SELECT 1 FROM family_members WHERE user_id = $1', [request.user.id])
-    if (membership.rowCount) {
-      await client.query('ROLLBACK')
-      return fail(response, 409, 'Вече сте член на семейство.')
-    }
     const { rows } = await client.query('INSERT INTO families (name, created_by) VALUES ($1, $2) RETURNING id', [name, request.user.id])
     await client.query('INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3)', [rows[0].id, request.user.id, 'owner'])
     await client.query('COMMIT')
@@ -299,11 +337,6 @@ app.post('/api/invitations/:token/accept', requireAuth, asyncRoute(async (reques
     if (!invitation || invitation.invited_email !== request.user.email) {
       await client.query('ROLLBACK')
       return fail(response, 400, 'Поканата е изтекла, използвана е или е за друг имейл адрес.')
-    }
-    const member = await client.query('SELECT 1 FROM family_members WHERE user_id = $1', [request.user.id])
-    if (member.rowCount) {
-      await client.query('ROLLBACK')
-      return fail(response, 409, 'Вече членувате в семейство.')
     }
     await client.query('INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3)', [invitation.family_id, request.user.id, 'member'])
     await client.query('UPDATE family_invitations SET used_at = now() WHERE id = $1', [invitation.id])
@@ -423,6 +456,65 @@ app.get('/api/events', requireAuth, asyncRoute(async (request, response) => {
     clearInterval(heartbeat)
     events.off(`family:${familyId}`, sendUpdate)
   })
+}))
+
+app.get('/api/admin/families', requireAuth, requireAdmin, asyncRoute(async (_request, response) => {
+  response.json({ families: await listAdminFamilies() })
+}))
+
+app.post('/api/admin/families', requireAuth, requireAdmin, asyncRoute(async (request, response) => {
+  const name = typeof request.body.name === 'string' ? request.body.name.trim() : ''
+  if (!name || name.length > 80) return fail(response, 400, 'Името на списъка трябва да е до 80 символа.')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { rows } = await client.query(
+      'INSERT INTO families (name, created_by) VALUES ($1, $2) RETURNING id, name, created_by, created_at',
+      [name, request.user.id],
+    )
+    await client.query('INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3)', [rows[0].id, request.user.id, 'owner'])
+    await client.query('COMMIT')
+    const family = await familySummary(rows[0].id)
+    response.status(201).json({ family })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}))
+
+app.delete('/api/admin/families/:id', requireAuth, requireAdmin, asyncRoute(async (request, response) => {
+  if (!isUuid(request.params.id)) return fail(response, 400, 'Списъкът не е намерен.')
+  const result = await pool.query('DELETE FROM families WHERE id = $1', [request.params.id])
+  if (!result.rowCount) return fail(response, 404, 'Списъкът не е намерен.')
+  response.status(204).end()
+}))
+
+app.post('/api/admin/families/:id/members', requireAuth, requireAdmin, asyncRoute(async (request, response) => {
+  const familyId = request.params.id
+  if (!isUuid(familyId)) return fail(response, 400, 'Списъкът не е намерен.')
+  const email = typeof request.body.email === 'string' ? request.body.email.trim().toLowerCase() : ''
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return fail(response, 400, 'Въведете валиден имейл адрес.')
+  const role = request.body.role === 'owner' ? 'owner' : 'member'
+  const { rows: userRows } = await pool.query('SELECT id, display_name, email FROM app_users WHERE email = $1', [email])
+  const targetUser = userRows[0]
+  if (!targetUser) return fail(response, 404, 'Потребителят не е намерен.')
+  const { rowCount } = await pool.query('SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2', [familyId, targetUser.id])
+  if (rowCount) return fail(response, 409, 'Потребителят вече е член на този списък.')
+  await pool.query('INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3)', [familyId, targetUser.id, role])
+  notifyFamily(familyId)
+  response.status(201).json({ member: { user_id: targetUser.id, display_name: targetUser.display_name, email: targetUser.email, role } })
+}))
+
+app.delete('/api/admin/families/:id/members/:userId', requireAuth, requireAdmin, asyncRoute(async (request, response) => {
+  const familyId = request.params.id
+  const userId = request.params.userId
+  if (!isUuid(familyId) || !isUuid(userId)) return fail(response, 400, 'Членът не е намерен.')
+  const { rowCount } = await pool.query('DELETE FROM family_members WHERE family_id = $1 AND user_id = $2', [familyId, userId])
+  if (!rowCount) return fail(response, 404, 'Членът не е намерен.')
+  notifyFamily(familyId)
+  response.status(204).end()
 }))
 
 app.get('/api/admin/overview', requireAuth, requireAdmin, asyncRoute(async (_request, response) => {

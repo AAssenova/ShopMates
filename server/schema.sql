@@ -19,11 +19,13 @@ CREATE TABLE IF NOT EXISTS families (
 
 CREATE TABLE IF NOT EXISTS family_members (
   family_id uuid NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-  user_id uuid NOT NULL UNIQUE REFERENCES app_users(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
   role text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'member')),
   joined_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (family_id, user_id)
 );
+
+ALTER TABLE family_members DROP CONSTRAINT IF EXISTS family_members_user_id_key;
 
 CREATE TABLE IF NOT EXISTS shopping_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
